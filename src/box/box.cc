@@ -5436,8 +5436,8 @@ bootstrap_from_master(struct replica *master)
 		 applier_addr_str(applier));
 
 	/*
-	 * Send JOIN request to master
-	 * See box_process_join().
+	 * Send FETCH_SNAPSHOT request to master.
+	 * See box_process_fetch_snapshot().
 	 */
 	assert(!tt_uuid_is_nil(&INSTANCE_UUID));
 	try {
@@ -5453,23 +5453,18 @@ bootstrap_from_master(struct replica *master)
 	 * Process initial data (snapshot or dirty disk data).
 	 */
 	engine_begin_initial_recovery_xc(NULL);
-	enum applier_state wait_state = cfg_replication_anon ?
-					APPLIER_FETCHED_SNAPSHOT :
-					APPLIER_FINAL_JOIN;
-	applier_resume_to_state(applier, wait_state, TIMEOUT_INFINITY);
+	applier_resume_to_state(applier, APPLIER_FETCHED_SNAPSHOT,
+				TIMEOUT_INFINITY);
 
 	box_run_on_recovery_state(RECOVERY_STATE_SNAPSHOT_RECOVERED);
 
 	/*
-	 * Process final data (WALs).
+	 * Finalize recovery. WALs will be received later via
+	 * REGISTER and SUBSCRIBE after the initial checkpoint.
 	 */
 	engine_begin_final_recovery_xc();
 	recovery_journal_create(&instance_vclock_storage);
 
-	if (!cfg_replication_anon) {
-		applier_resume_to_state(applier, APPLIER_JOINED,
-					TIMEOUT_INFINITY);
-	}
 	/* Finalize the new replica */
 	engine_end_recovery_xc();
 	if (box_set_replication_synchro_queue_max_size() != 0)
@@ -5480,7 +5475,7 @@ bootstrap_from_master(struct replica *master)
 	assert(applier->state == APPLIER_READY);
 
 	/*
-	 * An engine may write to WAL on its own during the join
+	 * An engine may write to WAL on its own during the bootstrap
 	 * stage (e.g. Vinyl's deferred DELETEs). That's OK - those
 	 * records will pass through the recovery journal and wind
 	 * up in the initial checkpoint. However, we must enable
