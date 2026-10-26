@@ -2709,7 +2709,7 @@ applier_f(va_list ap)
 				 * `applier_subscribe` starts, because we'll
 				 * start receiving raft messages there.
 				 */
-				if (need_id && was_anon) {
+				if (need_id && was_anon && box_is_configured()) {
 					assert(instance_id != 0);
 					raft_cfg_instance_id(box_raft(),
 							     instance_id);

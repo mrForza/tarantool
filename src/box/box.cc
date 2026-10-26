@@ -4731,24 +4731,6 @@ box_process_register(struct iostream *io, const struct xrow_header *header)
 	if (tt_uuid_is_equal(&req.instance_uuid, &INSTANCE_UUID))
 		tnt_raise(ClientError, ER_CONNECTION_TO_SELF);
 
-	/*
-	 * We only get register requests from instances which need some actual
-	 * registration - name, id.
-	 */
-	struct replica *replica = replica_by_uuid(&req.instance_uuid);
-	bool need_id = false;
-	bool need_name = false;
-	if (replica == NULL) {
-		need_id = true;
-		need_name = *req.instance_name != 0;
-	} else {
-		need_id = replica->id == REPLICA_ID_NIL;
-		need_name = strcmp(req.instance_name, replica->name) != 0;
-	}
-	if (!need_id && !need_name) {
-		tnt_raise(ClientError, ER_REPLICA_NOT_ANON,
-			  tt_uuid_str(&req.instance_uuid));
-	}
 	if (box_is_anon()) {
 		tnt_raise(ClientError, ER_UNSUPPORTED, "Anonymous replica",
 			  "registration of non-anonymous nodes.");
@@ -4761,6 +4743,7 @@ box_process_register(struct iostream *io, const struct xrow_header *header)
 
 	struct vclock start_vclock;
 	box_localize_vclock(&req.vclock, &start_vclock);
+	struct replica *replica = replica_by_uuid(&req.instance_uuid);
 	auto replica_guard = box_connect_replica(&req.instance_uuid,
 						 &start_vclock, &replica);
 
@@ -6003,10 +5986,15 @@ box_cfg_xc(void)
 	 * The instance won't exist in _cluster space if it is an
 	 * anonymous replica, add it manually.
 	 */
-	if (cfg_replication_anon != box_is_anon())
-		panic("'replication_anon' cfg didn't work");
+	bool registered = replicaset_is_registered_remotely(&INSTANCE_UUID);
+	if (cfg_replication_anon != box_is_anon()) {
+		if (!registered)
+			panic("'replication_anon' cfg didn't work");
+		if (replicaset.applier.connected == 0)
+			tnt_raise(ClientError, ER_CANNOT_REGISTER);
+	}
 	struct replica *self = replica_by_uuid(&INSTANCE_UUID);
-	if (!cfg_replication_anon) {
+	if (!cfg_replication_anon && !registered) {
 		if (self == NULL || self->id == REPLICA_ID_NIL) {
 			tnt_raise(ClientError, ER_UNKNOWN_REPLICA,
 				  tt_uuid_str(&INSTANCE_UUID),
@@ -6030,6 +6018,17 @@ box_cfg_xc(void)
 
 	/* Follow replica */
 	replicaset_follow();
+	/*
+	 * If the instance is anonymous locally, but named by config, a master
+	 * has the own _cluster row committed, and the applier resumed above
+	 * will re-register and receive the row back in the registration
+	 * stream. Wait for it to be applied, so that instance_id is known
+	 * before Raft is configured below.
+	 */
+	if (registered) {
+		while (instance_id == REPLICA_ID_NIL)
+			fiber_sleep(0.01);
+	}
 
 	/*
 	 * Fill in leader election parameters after bootstrap. Before it is not
